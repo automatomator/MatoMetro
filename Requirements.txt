@@ -1,0 +1,13 @@
+# Core UI and Image Processing
+PyQt6
+numpy
+opencv-python
+
+# Scientific Computing
+scipy
+
+# 3D Mesh Handling (for STL support)
+trimesh
+
+# For the print_evaluation.py script (if used as part of the package or for testing)
+matplotlib
