@@ -52,11 +52,11 @@ This section outlines the planned enhancements and new features. The **"Next Wor
 This phase addresses the integration of new data types and enhanced user interaction capabilities.
 
 1.  **Interactive Pre-analysis Adjustments:**
-    * **2D Image Manipulation:** Implement features allowing users to interactively adjust scale, rotation, and translation of input images (both part and reference) using mouse gestures *before* the core analysis is performed. This includes:
+    * **2D Image Manipulation:** Allow users to interactively adjust scale, rotation, and translation of input images (both part and reference) using mouse gestures *before* the core analysis is performed. This includes:
         * Manual scaling/zoom of images.
         * Interactive rotation of images.
         * Panning/translation of images within the view.
-        * Potential for basic cropping or masking of image regions.
+        * Potential for cropping or masking of image regions.
     * **3D Model Manipulation (for STL References):** In the 3D mode, enable mouse interaction for initial scaling, rotation, and positioning of the loaded STL model for projection. This allows users to correctly orient and size the STL model for a proper 2D projection before it's used in the deviation analysis.
 
 2.  **Point Cloud / CMM Data Integration:**
@@ -87,7 +87,6 @@ This phase addresses the integration of new data types and enhanced user interac
     ```bash
     pip install opencv-python numpy PyQt6 scipy trimesh reportlab
     ```
-    (Note: `trimesh` is currently only required if you plan to extend to STL support, but it's good to include for future work if you use it).
 
 3.  **Run the Application:**
     Navigate to the root directory of the project in your terminal:
@@ -95,5 +94,3 @@ This phase addresses the integration of new data types and enhanced user interac
     cd C:/Users/singh/OneDrive/Desktop/logs/alpha_code/
     python main.py
     ```
-
----
