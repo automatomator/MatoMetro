@@ -28,7 +28,7 @@ This version represents a working proof of concept.
 
 ## Future Work / Roadmap
 
-This section outlines the planned enhancements and new features. The **"Next Work Session Focus"** details immediate priorities.
+This section outlines the planned enhancements and new features. For a detailed breakdown of immediate, mid-term, and long-term tasks, please refer to the [PLANNING.md](PLANNING.md) file.
 
 ### Phase 1: Core Functionality (Ongoing)
 * Refine existing image processing and contour extraction for improved accuracy and robustness.
@@ -38,7 +38,7 @@ This section outlines the planned enhancements and new features. The **"Next Wor
 * Further enhance alignment algorithms to handle a wider variety of part geometries and initial misalignments more effectively.
 
 ### Phase 3: Enhanced Analysis & Visualization (Medium Priority)
-* Implement localized deviation mapping (e.g., heatmap or color-coding on the superimposed image) to visualize deviation distribution.
+* Implement localized deviation mapping (e.g., heatmap or color-coding on the superimposed image).
 * Add more sophisticated deviation metrics (e.g., Hausdorff distance, average absolute deviation).
 * Introduce tolerance zones for pass/fail criteria.
 
@@ -47,35 +47,13 @@ This section outlines the planned enhancements and new features. The **"Next Wor
 * Improve user input validation and provide hints for optimal parameter selection.
 * Add save/load functionality for analysis configurations.
 
-### **Phase 5: Advanced Data Inputs & Interactive Pre-processing (Next Work Session Focus)**
-
-This phase addresses the integration of new data types and enhanced user interaction capabilities.
-
-1.  **Interactive Pre-analysis Adjustments:**
-    * **2D Image Manipulation:** Allow users to interactively adjust scale, rotation, and translation of input images (both part and reference) using mouse gestures *before* the core analysis is performed. This includes:
-        * Manual scaling/zoom of images.
-        * Interactive rotation of images.
-        * Panning/translation of images within the view.
-        * Potential for cropping or masking of image regions.
-    * **3D Model Manipulation (for STL References):** In the 3D mode, enable mouse interaction for initial scaling, rotation, and positioning of the loaded STL model for projection. This allows users to correctly orient and size the STL model for a proper 2D projection before it's used in the deviation analysis.
-
-2.  **Point Cloud / CMM Data Integration:**
-    * Develop the backend and UI components to handle and process 3D point cloud data or CMM (Coordinate Measuring Machine) scan data of manufactured parts.
-    * Enable direct comparison of this 3D point cloud data with CAD models (STL format) or 2D orthographic drawing files.
-    * Design an interactive UI/UX specifically for this point cloud workflow, allowing for visualization and analysis. (Note: Backend development for this is deferred, but UI/UX design can start).
-
-3.  **Specialized Propeller Analysis Module:**
-    * Introduce a distinct "Propeller Analysis" mode within the application.
-    * Develop algorithms to automatically extract and compare key geometric parameters from two CAD models of propellers (e.g., one with serrations, one without). This comparison should verify if they share the same:
-        * Overall Diameter
-        * Blade Pitch
-        * Number of Blades
-        * Rotor End Type
-
-4.  **Performance Evaluation & Design of Experiments (DOE) Framework:**
-    * Develop a mechanism to programmatically change the resolution of input images (part and reference) for systematic testing.
-    * Implement a framework to conduct a Design of Experiments (DOE), allowing for automated variation of parameters (like image resolution, blur kernel size, Canny thresholds, etc.) across multiple analysis runs.
-    * Automate the collection, storage, and initial reporting of performance metrics (e.g., accuracy, processing time) from these DOE runs.
+### Phase 5: Advanced Data Inputs & Interactive Pre-processing
+* **Interactive Pre-analysis Adjustments:**
+    * **2D Image Manipulation:** Allow users to interactively adjust scale, rotation, and translation of input images (both part and reference) using mouse gestures *before* the core analysis is performed. This includes manual scaling/zoom, interactive rotation, panning/translation, and potential for cropping or masking.
+    * **3D Model Manipulation (for STL References):** In the 3D mode, enable mouse interaction for initial scaling, rotation, and positioning of the loaded STL model for projection *before* projection and analysis.
+* **Point Cloud / CMM Data Integration:** Develop the backend and UI components to handle and process 3D point cloud data or CMM scan data. Enable direct comparison of this 3D data with CAD models (STL) or 2D drawings.
+* **Specialized Propeller Analysis Module:** Introduce a distinct mode for comparing two CAD models of propellers, automatically extracting and comparing key parameters like diameter, pitch, number of blades, and rotor end type.
+* **Performance Evaluation & Design of Experiments (DOE) Framework:** Develop a mechanism to programmatically change image resolution and implement a framework to conduct DOE to evaluate system performance across varying parameters.
 
 ## Setup and Running
 
