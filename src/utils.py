@@ -42,8 +42,11 @@ def convert_np_to_qpixmap(np_image, target_size: QSize = None):
 
     if len(np_image.shape) == 3:
         q_img = QImage(np_image.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-    else:
+    elif len(np_image.shape) == 2:
         q_img = QImage(np_image.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+    else:
+        logger.error(f"Unsupported image shape: {np_image.shape}")
+        return QPixmap()
 
     pixmap = QPixmap.fromImage(q_img)
 

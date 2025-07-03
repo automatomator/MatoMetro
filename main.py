@@ -1,3 +1,4 @@
+# main.py
 import sys
 import os # Keep os for path operations
 

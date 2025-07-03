@@ -2,7 +2,7 @@
 import numpy as np
 import trimesh
 import cv2
-from scipy.spatial import ConvexHull, KDTree
+from scipy.spatial import ConvexHull, KDTree # Ensure ConvexHull is imported here
 from scipy.ndimage import rotate as ndimage_rotate
 from PyQt6.QtCore import QThread, pyqtSignal
 import tempfile 
@@ -49,20 +49,26 @@ class AnalysisWorker(QThread):
         self.part_pixels_per_mm_value = config.part_pixels_per_mm_value
         self.reference_pixels_per_mm_value = config.reference_pixels_per_mm_value
 
+
     def run(self):
         try:
             self.progress_updated_with_text.emit(5, "Loading Images")
-            
+
             # Initialize ImageProcessor with the config object
             image_processor = ImageProcessor(self.config)
 
             # Process part image
             original_part_image, part_contour, part_pixels_per_mm = image_processor.process_part_image()
+            if part_contour.size == 0:
+                raise ValueError("No part contour detected. Please check image and parameters.")
             self.progress_updated_with_text.emit(20, "Processing Part Image")
 
             # Process reference (image or STL)
             original_reference_image, reference_contour, reference_pixels_per_mm = image_processor.process_reference()
+            if reference_contour.size == 0:
+                raise ValueError("No reference contour detected. Please check file and parameters.")
             self.progress_updated_with_text.emit(40, "Processing Reference File")
+
 
             # --- Alignment ---
             self.progress_updated_with_text.emit(60, "Aligning Contours")
@@ -83,27 +89,27 @@ class AnalysisWorker(QThread):
             # Translate contours so their centroids align
             translation_x = cx_part - cx_ref
             translation_y = cy_part - cy_ref
-            
+
             # Apply initial translation to reference contour
-            translated_reference_contour = reference_contour + np.array([translation_x, translation_y])
-            
-            # Convert contours to float32 and reshape to (N, 2) for estimateAffine2D
-            part_contour_float = part_contour.reshape(-1, 2).astype(np.float32) # Optimized
-            translated_reference_contour_float = translated_reference_contour.reshape(-1, 2).astype(np.float32) # Optimized
+            # Ensure it's reshaped for arithmetic if it's (N, 1, 2)
+            translated_reference_contour = reference_contour.reshape(-1, 2) + np.array([translation_x, translation_y])
+            translated_reference_contour = translated_reference_contour.reshape(-1, 1, 2) # Reshape back to (N, 1, 2)
 
             # Attempt robust alignment using estimateAffine2D
             # This requires at least 3 points in each contour.
             M = None
-            if len(part_contour_float) >= 3 and len(translated_reference_contour_float) >= 3:
+            if len(part_contour) >= 3 and len(translated_reference_contour) >= 3:
                 try:
-                    # Use RANSAC for robustness against outliers
+                    # Reshape contours to (N, 2) and convert to float32 for estimateAffine2D
+                    part_contour_float = part_contour.reshape(-1, 2).astype(np.float32)
+                    translated_reference_contour_float = translated_reference_contour.reshape(-1, 2).astype(np.float32)
+
                     M, inliers = cv2.estimateAffine2D(translated_reference_contour_float, part_contour_float,
                                                     method=cv2.RANSAC, ransacReprojThreshold=5.0)
                     logger.info("Contours aligned using estimateAffine2D (RANSAC).")
                 except cv2.error as e:
                     logger.error(f"Error during contour alignment: {e}")
                     logger.warning("Falling back to simple centroid alignment.")
-                    # Fallback to simple centroid alignment if robust alignment fails
                     M = None # Indicate that robust alignment failed
             else:
                 logger.warning("Not enough points in contours for robust affine alignment. Falling back to simple centroid alignment.")
@@ -112,7 +118,6 @@ class AnalysisWorker(QThread):
             aligned_reference_contour = None
             if M is not None:
                 # Apply the affine transformation to the original reference contour
-                # Need to reshape reference_contour back to (N, 1, 2) for cv2.transform
                 aligned_reference_contour = cv2.transform(reference_contour.astype(np.float32), M).astype(np.int32)
                 aligned_reference_contour = aligned_reference_contour.reshape(-1, 1, 2) # Ensure (N, 1, 2) shape
             else:
@@ -137,6 +142,7 @@ class AnalysisWorker(QThread):
 
             # Calculate maximum point-to-point deviation
             # Use KDTree for efficient nearest neighbor search
+            # Ensure contours are reshaped to (N, 2) for KDTree
             kdtree_ref = KDTree(aligned_reference_contour.reshape(-1, 2))
             distances, _ = kdtree_ref.query(part_contour.reshape(-1, 2))
             max_deviation_pixels = np.max(distances)
@@ -160,22 +166,23 @@ class AnalysisWorker(QThread):
             # Ensure the blank image is BGR for color drawing
             part_boundary_image = np.zeros((display_height, display_width, 3), dtype=np.uint8)
             reference_boundary_image = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-            superimposed_image = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+            superimposed_image_display = np.zeros((display_height, display_width, 3), dtype=np.uint8) # Renamed to avoid conflict
 
             # Offset contours to fit into the new blank images
             offset_x = -min_x + padding
             offset_y = -min_y + padding
-            
+
             part_contour_offset = (part_contour + np.array([offset_x, offset_y])).astype(np.int32)
             aligned_reference_contour_offset = (aligned_reference_contour + np.array([offset_x, offset_y])).astype(np.int32)
 
-            # Draw contours
-            cv2.drawContours(part_boundary_image, [part_contour_offset], -1, (0, 255, 0), 2) # Green for part
-            cv2.drawContours(reference_boundary_image, [aligned_reference_contour_offset], -1, (255, 0, 0), 2) # Blue for reference
-            
+            # Draw contours with thicker lines for better visibility in reports/display
+            line_thickness = 2 # Increased thickness
+            cv2.drawContours(part_boundary_image, [part_contour_offset], -1, (0, 255, 0), line_thickness) # Green for part
+            cv2.drawContours(reference_boundary_image, [aligned_reference_contour_offset], -1, (255, 0, 0), line_thickness) # Blue for reference
+
             # Superimposed: part (green) and aligned reference (blue)
-            superimposed_image = cv2.addWeighted(part_boundary_image, 0.5, reference_boundary_image, 0.5, 0)
-            
+            superimposed_image_display = cv2.addWeighted(part_boundary_image, 0.5, reference_boundary_image, 0.5, 0)
+
             # Generate temporary file paths for saving images
             temp_dir = tempfile.gettempdir()
             part_boundary_path = os.path.join(temp_dir, "part_boundary.png")
@@ -184,7 +191,7 @@ class AnalysisWorker(QThread):
 
             cv2.imwrite(part_boundary_path, part_boundary_image)
             cv2.imwrite(reference_boundary_path, reference_boundary_image)
-            cv2.imwrite(superimposed_path, superimposed_image)
+            cv2.imwrite(superimposed_path, superimposed_image_display) # Use the correctly named variable
             logger.info(f"Superimposed image saved to {superimposed_path}")
 
             results = {
@@ -197,7 +204,8 @@ class AnalysisWorker(QThread):
                 'part_boundary_image_path': part_boundary_path,
                 'reference_boundary_image_path': reference_boundary_path,
                 'superimposed_image_path': superimposed_path,
-                'part_contour': part_contour # Pass original part contour
+                'part_contour': part_contour, # Pass original part contour
+                'part_processed_image': part_boundary_image # Already made thicker
             }
 
             self.progress_updated_with_text.emit(100, "Analysis Complete!")
@@ -207,3 +215,23 @@ class AnalysisWorker(QThread):
         except Exception as e:
             logger.error(f"An error occurred during analysis: {e}", exc_info=True)
             self.analysis_error.emit(f"An error occurred: {e}")
+
+    # Helper for pseudo-scale (used if calibration values are missing)
+    # This method is now primarily handled by ImageProcessor, but kept here if needed for direct use.
+    def _get_pseudo_pixels_per_mm(self, image_shape):
+        """
+        Calculates a pseudo pixels/mm ratio based on image diagonal,
+        assuming a standard "known" diagonal length in mm (e.g., 100mm).
+        This is a fallback for when explicit calibration is not provided.
+        """
+        height, width = image_shape[:2]
+        diagonal_pixels = (width**2 + height**2)**0.5
+        # Assume a standard diagonal of 100mm for pseudo-scaling
+        pseudo_known_distance_mm = 100.0
+        if diagonal_pixels == 0:
+            logger.warning("Image has zero diagonal pixels, returning default pseudo pixels/mm.")
+            return 1.0 # Default fallback
+
+        pseudo_pixels_per_mm = diagonal_pixels / pseudo_known_distance_mm
+        logger.warning(f"Using pseudo pixels/mm (fallback): {pseudo_pixels_per_mm:.2f}")
+        return pseudo_pixels_per_mm

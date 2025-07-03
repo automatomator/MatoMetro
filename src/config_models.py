@@ -39,6 +39,6 @@ class AnalysisConfig:
         if self.blur_kernel % 2 == 0:
             raise ValueError("blur_kernel must be an odd number.")
 
+    # Helper method to get dictionary representation for easy saving/passing
     def to_dict(self):
-        """Converts the dataclass instance to a dictionary."""
         return asdict(self)
