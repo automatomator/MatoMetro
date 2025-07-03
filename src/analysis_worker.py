@@ -2,14 +2,15 @@
 import numpy as np
 import trimesh
 import cv2
-from scipy.spatial import ConvexHull, KDTree # Ensure ConvexHull is imported here
+from scipy.spatial import ConvexHull, KDTree
 from scipy.ndimage import rotate as ndimage_rotate
 from PyQt6.QtCore import QThread, pyqtSignal
-import tempfile 
-import os # Import os
+import tempfile
+import os
 
 from .utils import logger
 from .image_processing import ImageProcessor # Import the ImageProcessor
+from .config_models import AnalysisConfig # Import the dataclass
 
 # --- Helper function for consistent angle from minAreaRect ---
 def get_min_area_rect_angle(contour):
@@ -21,7 +22,7 @@ def get_min_area_rect_angle(contour):
     angle = rect[2]
     if rect[1][0] < rect[1][1]: # width < height
         angle = 90 + angle
-    return angle
+    return angle % 180 # Normalize angle to be between 0 and 180
 
 class AnalysisWorker(QThread):
     """
@@ -33,179 +34,201 @@ class AnalysisWorker(QThread):
     analysis_error = pyqtSignal(str)
     progress_updated_with_text = pyqtSignal(int, str)
 
-    def __init__(self, config):
+    def __init__(self, config: AnalysisConfig):
         super().__init__()
         self.config = config
-        # Access dataclass attributes directly, not with .get()
-        self.image_path = config.image_path
-        self.reference_path = config.reference_path
-        self.reference_type = config.reference_type
-        self.projection_axis = config.projection_axis
-        self.blur_kernel = config.blur_kernel
-        self.processing_method = config.processing_method
-        self.canny_threshold1 = config.canny_threshold1
-        self.canny_threshold2 = config.canny_threshold2
-        self.threshold_value = config.threshold_value
-        self.part_pixels_per_mm_value = config.part_pixels_per_mm_value
-        self.reference_pixels_per_mm_value = config.reference_pixels_per_mm_value
-
+        self.image_processor = ImageProcessor(config) # Initialize ImageProcessor here
 
     def run(self):
+        logger.info("Analysis started.")
+        self.progress_updated_with_text.emit(0, "Starting analysis...")
+
         try:
-            self.progress_updated_with_text.emit(5, "Loading Images")
+            image_processor = self.image_processor
 
-            # Initialize ImageProcessor with the config object
-            image_processor = ImageProcessor(self.config)
-
-            # Process part image
-            original_part_image, part_contour, part_pixels_per_mm = image_processor.process_part_image()
-            if part_contour.size == 0:
-                raise ValueError("No part contour detected. Please check image and parameters.")
-            self.progress_updated_with_text.emit(20, "Processing Part Image")
-
-            # Process reference (image or STL)
-            original_reference_image, reference_contour, reference_pixels_per_mm = image_processor.process_reference()
-            if reference_contour.size == 0:
-                raise ValueError("No reference contour detected. Please check file and parameters.")
-            self.progress_updated_with_text.emit(40, "Processing Reference File")
+            # --- Step 1: Process Part Image ---
+            self.progress_updated_with_text.emit(10, "Processing part image...")
+            part_original_image, part_contour, part_pixels_per_mm = image_processor.process_image(
+                self.config.image_path, self.config.part_pixels_per_mm_value
+            )
+            if part_contour is None or len(part_contour) < 3:
+                raise ValueError("Could not detect sufficient contour points in the part image. Please check image or adjust parameters.")
+            logger.info(f"Part image processed. Pixels/mm: {part_pixels_per_mm}")
 
 
-            # --- Alignment ---
-            self.progress_updated_with_text.emit(60, "Aligning Contours")
+            # --- Step 2: Process Reference (Image or STL) ---
+            self.progress_updated_with_text.emit(30, "Processing reference...")
+            reference_original_image, reference_contour, reference_pixels_per_mm = image_processor.process_reference(
+                self.config.reference_path, self.config.reference_type, self.config.reference_pixels_per_mm_value,
+                self.config.projection_axis
+            )
+            if reference_contour is None or len(reference_contour) < 3:
+                raise ValueError("Could not detect sufficient contour points in the reference. Please check file or adjust parameters.")
+            logger.info(f"Reference processed. Type: {self.config.reference_type}, Pixels/mm: {reference_pixels_per_mm}")
 
-            # Calculate initial centroids
-            M_part = cv2.moments(part_contour)
-            if M_part["m00"] == 0:
-                raise ValueError("Part contour has zero area, cannot proceed with analysis.")
-            cx_part = int(M_part["m10"] / M_part["m00"])
-            cy_part = int(M_part["m01"] / M_part["m00"])
+            # --- Step 3: Alignment and Deviation Calculation ---
+            self.progress_updated_with_text.emit(50, "Performing alignment...")
 
-            M_ref = cv2.moments(reference_contour)
-            if M_ref["m00"] == 0:
-                raise ValueError("Reference contour has zero area, cannot proceed with analysis.")
-            cx_ref = int(M_ref["m10"] / M_ref["m00"])
-            cy_ref = int(M_ref["m01"] / M_ref["m00"])
+            # Ensure contours are Nx2 for calculations and then convert to float32
+            # The contours from cv2.findContours are typically Nx1x2.
+            # Reshape them to Nx2 for easier arithmetic operations.
+            part_contour_flat = part_contour.reshape(-1, 2).astype(np.float32)
+            reference_contour_flat = reference_contour.reshape(-1, 2).astype(np.float32)
 
-            # Translate contours so their centroids align
-            translation_x = cx_part - cx_ref
-            translation_y = cy_part - cy_ref
+            # Explicit check for sufficient points after flattening
+            if part_contour_flat.shape[0] < 3:
+                raise ValueError("Part contour has fewer than 3 points after flattening, cannot perform alignment.")
+            if reference_contour_flat.shape[0] < 3:
+                raise ValueError("Reference contour has fewer than 3 points after flattening, cannot perform alignment.")
 
-            # Apply initial translation to reference contour
-            # Ensure it's reshaped for arithmetic if it's (N, 1, 2)
-            translated_reference_contour = reference_contour.reshape(-1, 2) + np.array([translation_x, translation_y])
-            translated_reference_contour = translated_reference_contour.reshape(-1, 1, 2) # Reshape back to (N, 1, 2)
 
-            # Attempt robust alignment using estimateAffine2D
-            # This requires at least 3 points in each contour.
-            M = None
-            if len(part_contour) >= 3 and len(translated_reference_contour) >= 3:
-                try:
-                    # Reshape contours to (N, 2) and convert to float32 for estimateAffine2D
-                    part_contour_float = part_contour.reshape(-1, 2).astype(np.float32)
-                    translated_reference_contour_float = translated_reference_contour.reshape(-1, 2).astype(np.float32)
+            # Calculate scaling factor to bring part contour to reference's pixel density
+            # This factor is used to scale the part contour so that its "pixels"
+            # represent the same real-world distance as the reference's "pixels".
+            # This is crucial for estimateAffine2D to find a meaningful transformation.
+            # Example: if part is 0.22 px/mm and ref is 100 px/mm, ref is much denser.
+            # We scale part_contour by (100 / 0.22) = ~454.54 to make it comparable.
+            alignment_scale_factor = reference_pixels_per_mm / part_pixels_per_mm
+            
+            # Apply scaling to the part contour (convert part's pixel space to reference's pixel space)
+            part_aligned_scale_contour = part_contour_flat * alignment_scale_factor
 
-                    M, inliers = cv2.estimateAffine2D(translated_reference_contour_float, part_contour_float,
-                                                    method=cv2.RANSAC, ransacReprojThreshold=5.0)
-                    logger.info("Contours aligned using estimateAffine2D (RANSAC).")
-                except cv2.error as e:
-                    logger.error(f"Error during contour alignment: {e}")
-                    logger.warning("Falling back to simple centroid alignment.")
-                    M = None # Indicate that robust alignment failed
-            else:
-                logger.warning("Not enough points in contours for robust affine alignment. Falling back to simple centroid alignment.")
-                M = None # Indicate that robust alignment skipped
+            # Center both contours around their respective centroids
+            # This helps in providing stable input for estimateAffine2D
+            part_centroid = np.mean(part_aligned_scale_contour, axis=0)
+            reference_centroid = np.mean(reference_contour_flat, axis=0)
 
-            aligned_reference_contour = None
-            if M is not None:
-                # Apply the affine transformation to the original reference contour
-                aligned_reference_contour = cv2.transform(reference_contour.astype(np.float32), M).astype(np.int32)
-                aligned_reference_contour = aligned_reference_contour.reshape(-1, 1, 2) # Ensure (N, 1, 2) shape
-            else:
-                # If estimateAffine2D failed or skipped, just use the centroid-aligned contour
-                aligned_reference_contour = translated_reference_contour.astype(np.int32).reshape(-1, 1, 2)
-                logger.info("Using simple centroid alignment for reference contour.")
+            part_scaled_centered = part_aligned_scale_contour - part_centroid
+            reference_centered_final = reference_contour_flat - reference_centroid # Renamed for clarity
 
-            # --- Calculate Deviations ---
-            self.progress_updated_with_text.emit(70, "Calculating Deviations")
+            # Final reshape for cv2.estimateAffine2D (expects Nx1x2)
+            # This format is standard for many OpenCV geometry functions.
+            part_scaled_for_affine = part_scaled_centered.reshape(-1, 1, 2)
+            reference_centered_for_affine = reference_centered_final.reshape(-1, 1, 2)
 
-            # Calculate contour areas in pixels
-            part_area_pixels = cv2.contourArea(part_contour)
-            reference_area_pixels = cv2.contourArea(aligned_reference_contour) # Use aligned reference contour
+            # Perform alignment using estimateAffine2D (finds rotation, translation, scale, shear)
+            # method=cv2.RANSAC makes it robust to outliers.
+            # ransacReprojThreshold: Maximum allowed reprojection error to treat a point pair as an inlier.
+            logger.info("Attempting to estimate affine transformation...")
+            M, inliers = cv2.estimateAffine2D(
+                part_scaled_for_affine,
+                reference_centered_for_affine,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=5.0
+            )
 
-            # Convert areas to mm²
-            # Area in mm² = Area in pixels² / (pixels/mm)²
-            part_area_mm2 = part_area_pixels / (part_pixels_per_mm**2)
-            reference_area_mm2 = reference_area_pixels / (reference_pixels_per_mm**2)
+            # Check if affine transformation matrix was successfully estimated
+            if M is None:
+                raise RuntimeError(
+                    "Failed to estimate affine transformation. "
+                    "This might indicate insufficient matching features or highly dissimilar contours. "
+                    "Consider adjusting image processing parameters or checking image quality, or try a different reference."
+                )
+            
+            logger.info("Affine transformation estimated successfully.")
 
-            # Area Deviation
-            area_deviation_percent = ((part_area_mm2 - reference_area_mm2) / reference_area_mm2) * 100 if reference_area_mm2 != 0 else 0
+            # Apply the estimated transformation to the part contour (still in reference's pixel scale)
+            aligned_part_contour_transformed = cv2.transform(part_scaled_for_affine, M)
 
-            # Calculate maximum point-to-point deviation
+            # Convert the aligned part contour back to the 'real-world' mm scale if needed for deviation.
+            # Since reference_contour_flat is already in 'reference pixels', and we applied M to a
+            # scaled part contour (now effectively in 'reference pixels'), both `aligned_part_contour_transformed`
+            # and `reference_centered_final` are in the same relative pixel space.
+            # To get deviation in mm, we divide by `reference_pixels_per_mm`.
+
+            # Adjust centroids back for deviation calculation (optional, can work with centered)
+            # For accurate deviation, we need points in a common real-world coordinate system (mm)
+            # and ideally, originating from their 'original' positions before centering.
+
+            # Revert centering for both and convert to mm
+            aligned_part_contour_mm = (aligned_part_contour_transformed.reshape(-1, 2) + reference_centroid) / reference_pixels_per_mm
+            reference_contour_mm = (reference_contour_flat + reference_centroid) / reference_pixels_per_mm
+
+            # Area Calculation (in mm²)
+            image_area_mm2 = cv2.contourArea(aligned_part_contour_mm)
+            reference_area_mm2 = cv2.contourArea(reference_contour_mm)
+
+            area_deviation_percent = ((image_area_mm2 - reference_area_mm2) / reference_area_mm2) * 100 if reference_area_mm2 != 0 else 0
+
+            # Calculate Maximum Contour Deviation (in mm)
             # Use KDTree for efficient nearest neighbor search
-            # Ensure contours are reshaped to (N, 2) for KDTree
-            kdtree_ref = KDTree(aligned_reference_contour.reshape(-1, 2))
-            distances, _ = kdtree_ref.query(part_contour.reshape(-1, 2))
-            max_deviation_pixels = np.max(distances)
-            max_deviation_mm = max_deviation_pixels / part_pixels_per_mm # Convert to mm
+            if len(aligned_part_contour_mm) > 0 and len(reference_contour_mm) > 0:
+                kdtree_reference = KDTree(reference_contour_mm)
+                distances, _ = kdtree_reference.query(aligned_part_contour_mm)
+                max_deviation_mm = np.max(distances)
+            else:
+                max_deviation_mm = 0.0
+                logger.warning("One of the contours is empty after alignment, cannot calculate max deviation.")
 
-            # --- Generate Visual Outputs ---
-            self.progress_updated_with_text.emit(80, "Generating Visual Outputs")
+            self.progress_updated_with_text.emit(80, "Generating visual outputs...")
 
-            # Create a combined image for visualization
-            # Determine the size of the combined image
-            all_contours = np.vstack([part_contour.reshape(-1, 2), aligned_reference_contour.reshape(-1, 2)])
-            min_x, min_y = np.min(all_contours, axis=0)
-            max_x, max_y = np.max(all_contours, axis=0)
+            # --- Visual Outputs ---
+            # Create superimposed image
+            # The contours are currently float. Convert to int for drawing.
+            # Both need to be put on a common canvas, which implies common scale and origin.
+            # Let's use the reference_original_image's coordinate system for superposition,
+            # or a new blank image based on reference image dimensions.
+            
+            # Draw the aligned part contour onto the reference image.
+            # Need to convert aligned_part_contour_transformed (in reference's pixel space, centered)
+            # back to original reference image coordinates for drawing.
+            aligned_part_contour_display = (aligned_part_contour_transformed.reshape(-1, 2) + reference_centroid).astype(np.int32)
+            
+            # Ensure reference_original_image is BGR for drawing colored contours
+            if len(reference_original_image.shape) == 2:
+                superimposed_image = cv2.cvtColor(reference_original_image, cv2.COLOR_GRAY2BGR)
+            else:
+                superimposed_image = reference_original_image.copy()
 
-            # Add padding to the boundaries
-            padding = 50
-            display_width = int(max_x - min_x + 2 * padding)
-            display_height = int(max_y - min_y + 2 * padding)
+            # Draw the original reference contour (white)
+            cv2.drawContours(superimposed_image, [reference_contour], -1, (255, 255, 255), 2)
+            # Draw the aligned part contour (green)
+            cv2.drawContours(superimposed_image, [aligned_part_contour_display], -1, (0, 255, 0), 2)
 
-            # Create blank images for drawing
-            # Ensure the blank image is BGR for color drawing
-            part_boundary_image = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-            reference_boundary_image = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-            superimposed_image_display = np.zeros((display_height, display_width, 3), dtype=np.uint8) # Renamed to avoid conflict
-
-            # Offset contours to fit into the new blank images
-            offset_x = -min_x + padding
-            offset_y = -min_y + padding
-
-            part_contour_offset = (part_contour + np.array([offset_x, offset_y])).astype(np.int32)
-            aligned_reference_contour_offset = (aligned_reference_contour + np.array([offset_x, offset_y])).astype(np.int32)
-
-            # Draw contours with thicker lines for better visibility in reports/display
-            line_thickness = 2 # Increased thickness
-            cv2.drawContours(part_boundary_image, [part_contour_offset], -1, (0, 255, 0), line_thickness) # Green for part
-            cv2.drawContours(reference_boundary_image, [aligned_reference_contour_offset], -1, (255, 0, 0), line_thickness) # Blue for reference
-
-            # Superimposed: part (green) and aligned reference (blue)
-            superimposed_image_display = cv2.addWeighted(part_boundary_image, 0.5, reference_boundary_image, 0.5, 0)
-
-            # Generate temporary file paths for saving images
+            # Prepare processed images for display in UI and report
+            part_processed_display_image = image_processor.draw_contour_on_image(part_original_image, part_contour)
+            reference_processed_display_image = image_processor.draw_contour_on_image(reference_original_image, reference_contour)
+            
+            # Save temporary images for reporting
+            # Create a temporary directory or use a known temp path
             temp_dir = tempfile.gettempdir()
-            part_boundary_path = os.path.join(temp_dir, "part_boundary.png")
-            reference_boundary_path = os.path.join(temp_dir, "reference_boundary.png")
-            superimposed_path = os.path.join(temp_dir, "superimposed_result.png")
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            part_img_temp_path = os.path.join(temp_dir, f"part_processed_{timestamp}.png")
+            reference_img_temp_path = os.path.join(temp_dir, f"reference_processed_{timestamp}.png")
+            superimposed_img_temp_path = os.path.join(temp_dir, f"superimposed_{timestamp}.png")
 
-            cv2.imwrite(part_boundary_path, part_boundary_image)
-            cv2.imwrite(reference_boundary_path, reference_boundary_image)
-            cv2.imwrite(superimposed_path, superimposed_image_display) # Use the correctly named variable
-            logger.info(f"Superimposed image saved to {superimposed_path}")
+            cv2.imwrite(part_img_temp_path, part_processed_display_image)
+            cv2.imwrite(reference_img_temp_path, reference_processed_display_image)
+            cv2.imwrite(superimposed_img_temp_path, superimposed_image)
 
+
+            self.progress_updated_with_text.emit(90, "Finalizing report data...")
+
+            # Prepare results dictionary
             results = {
-                'image_path': self.image_path,
-                'reference_path': self.reference_path,
-                'part_area_mm2': part_area_mm2,
+                'part_image_path': self.config.image_path,
+                'reference_path': self.config.reference_path,
+                'reference_type': self.config.reference_type,
+                'part_pixels_per_mm': part_pixels_per_mm,
+                'reference_pixels_per_mm': reference_pixels_per_mm,
+                'part_area_mm2': image_area_mm2,
                 'reference_area_mm2': reference_area_mm2,
                 'area_deviation_percent': area_deviation_percent,
                 'max_deviation_mm': max_deviation_mm,
-                'part_boundary_image_path': part_boundary_path,
-                'reference_boundary_image_path': reference_boundary_path,
-                'superimposed_image_path': superimposed_path,
-                'part_contour': part_contour, # Pass original part contour
-                'part_processed_image': part_boundary_image # Already made thicker
+                'aligned_part_contour': aligned_part_contour_display, # Pass aligned part contour for UI drawing
+                'aligned_reference_contour': reference_contour, # Pass original reference contour
+                
+                # These are the NumPy arrays for direct UI display in BoundaryComparisonWindow
+                'superimposed_image': superimposed_image,
+                'part_processed_display_image': part_processed_display_image,
+                'reference_processed_display_image': reference_processed_display_image,
+                
+                # These are the paths to temporary files for the PDF report
+                'processed_part_image_path': part_img_temp_path,
+                'processed_reference_image_path': reference_img_temp_path,
+                'superimposed_image_path': superimposed_img_temp_path,
+
+                'part_contour': part_contour # Pass original part contour
             }
 
             self.progress_updated_with_text.emit(100, "Analysis Complete!")
@@ -233,5 +256,5 @@ class AnalysisWorker(QThread):
             return 1.0 # Default fallback
 
         pseudo_pixels_per_mm = diagonal_pixels / pseudo_known_distance_mm
-        logger.warning(f"Using pseudo pixels/mm (fallback): {pseudo_pixels_per_mm:.2f}")
+        logger.info(f"Calculated pseudo pixels/mm: {pseudo_pixels_per_mm:.2f}")
         return pseudo_pixels_per_mm
